@@ -57,11 +57,12 @@ else:
     netD = define_D(config.input_nc + config.output_nc, config.ndf, 'batch', False, range(torch.cuda.device_count()))
 
 # Extract features
-features = netG.get_features()
+features = []
+def hook_fn(module, input, output):
+    features.append(output)
 
-# Now `features` contains the outputs of the convolutional layers
-for idx, feature in enumerate(features):
-    print(f"Feature {idx} shape: {feature.shape}")
+layer = netG.model[11]
+layer.register_forward_hook(hook_fn)
 
 criterionGAN = GANLoss()
 criterionL1 = nn.L1Loss()
@@ -98,8 +99,9 @@ for iteration, batch in enumerate(training_data_loader, 1):
     # logging.critical(real_b_cpu.size())
     real_a.resize_(real_a_cpu.size()).copy_(real_a_cpu)
     real_b.resize_(real_b_cpu.size()).copy_(real_b_cpu)
-    features = netG(real_a)
-    print(type(features))
-    # Now `features` contains the outputs of the convolutional layers
-    for idx, feature in enumerate(features):
-        print(f"Feature {idx} shape: {feature.shape}")
+    outputG = netG(real_a)
+    if len(features) >0 :
+        extracted_features = features[0]
+        print(f'extracted featuer shape = {extracted_features.shape}')
+    features.clear()
+    exit()
