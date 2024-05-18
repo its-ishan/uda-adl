@@ -3,6 +3,20 @@ import torch.nn as nn
 from torch.autograd import Variable
 import numpy as np
 
+class Classifier_Module(nn.Module):
+    def __init__(self, inplanes, dilation_series, padding_series, num_classes):
+        super(Classifier_Module, self).__init__()
+        self.conv2d_list = nn.ModuleList()
+        for dilation, padding in zip(dilation_series, padding_series):
+            self.conv2d_list.append(nn.Conv2d(inplanes, num_classes, kernel_size=3, stride=1,
+                                              padding=padding, dilation=dilation, bias=True))
+
+    def forward(self, x):
+        out = self.conv2d_list[0](x)
+        for i in range(1, len(self.conv2d_list)):
+            out += self.conv2d_list[i](x)
+        return out
+
 def weights_init(m):
     classname = m.__class__.__name__
     if classname.find('Conv') != -1:
@@ -21,7 +35,22 @@ def get_norm_layer(norm_type):
         print('normalization layer [%s] is not found' % norm_type)
     return norm_layer
 
+"""
+def define_G(input_nc, output_nc, ngf, norm='batch', use_dropout=False, gpu_ids=[]):
+    netG = None
+    use_gpu = len(gpu_ids) > 0
+    norm_layer = get_norm_layer(norm_type=norm)
 
+    if use_gpu:
+        assert(torch.cuda.is_available())
+
+    netG = ResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9, gpu_ids=gpu_ids)
+
+    if len(gpu_ids) > 0:
+        netG.cuda(device=gpu_ids[0])
+    netG.apply(weights_init)
+    return netG
+"""
 def define_G(input_nc, output_nc, ngf, norm='batch', use_dropout=False, gpu_ids=[]):
     netG = None
     use_gpu = len(gpu_ids) > 0
@@ -37,7 +66,7 @@ def define_G(input_nc, output_nc, ngf, norm='batch', use_dropout=False, gpu_ids=
     netG.apply(weights_init)
     return netG
 
-
+"""
 def define_D(input_nc, ndf, norm='batch', use_sigmoid=False, gpu_ids=[]):
     netD = None
     use_gpu = len(gpu_ids) > 0
@@ -52,7 +81,21 @@ def define_D(input_nc, ndf, norm='batch', use_sigmoid=False, gpu_ids=[]):
         netD.cuda(device=gpu_ids[0])
     netD.apply(weights_init)
     return netD
+"""
+def define_D(input_nc, ndf, norm='batch', use_sigmoid=False, gpu_ids=[]):
+    netD = None
+    use_gpu = len(gpu_ids) > 0
+    norm_layer = get_norm_layer(norm_type=norm)
 
+    if use_gpu:
+        assert(torch.cuda.is_available())
+
+    netD = NLayerDiscriminator(input_nc, ndf, n_layers=3, norm_layer=norm_layer, use_sigmoid=use_sigmoid, gpu_ids=gpu_ids)
+
+    if use_gpu:
+        netD.cuda(device=gpu_ids[0])
+    netD.apply(weights_init)
+    return netD
 
 def print_network(net):
     num_params = 0
@@ -141,6 +184,9 @@ class ResnetGenerator(nn.Module):
 
         self.model = nn.Sequential(*model)
         self._register_hooks()
+        #128*128*256
+        #coarse classfier
+        self.classifier = Classifier_Module(256, [6, 12, 18, 24], [6, 12, 18, 24], num_classes=21)
 
     def _hook_fn(self, module, input, output):
         self.features.append(output)
@@ -152,7 +198,7 @@ class ResnetGenerator(nn.Module):
 
     def forward(self, input):
         self.features=[]
-        print(input.data.size())
+        #print(input.data.size())
         if self.gpu_ids and isinstance(input.data, torch.cuda.FloatTensor):
             return nn.parallel.data_parallel(self.model, input, self.gpu_ids)
         else:
