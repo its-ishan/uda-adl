@@ -1,7 +1,11 @@
 from dataloader import dataloader
 from configs import config_loader
 from models.networks import define_G, define_D, GANLoss, print_network
-
+import util.util
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+import torch.nn.functional as F
 import os
 import torch
 import torch.nn as nn
@@ -10,10 +14,15 @@ from torch.autograd import Variable
 from torch.utils.data import DataLoader
 import torch.backends.cudnn as cudnn
 import logging
-import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.manifold import TSNE
+import torch.utils.data as data
 from torch.cuda.amp import autocast, GradScaler
+from PIL import Image
+
+def custom_collate(batch):
+    batch = list(filter(lambda x: x is not None, batch))
+    if len(batch) == 0:
+        return None
+    return data.default_collate(batch)
 
 # Load the configuration
 config = config_loader.load_config('configs/config.yaml')
@@ -48,7 +57,7 @@ logging.critical('===> Loading datasets')
 # Initialize DataLoader
 train_set = dataloader.get_training_set(config.root_dir)
 training_data_loader = DataLoader(dataset=train_set, num_workers=config.threads, batch_size=config.batch_size,
-                                  shuffle=True)
+                                  shuffle=True, collate_fn=custom_collate)
 
 # Building Model
 logging.critical(f'Number of cuda devices found: {str(torch.cuda.device_count())}')
@@ -58,21 +67,27 @@ if config.modelG:
     netG = torch.load(config.modelG)
 else:
     netG = define_G(config.input_nc, config.output_nc, config.ngf, 'batch', False, range(torch.cuda.device_count()))
-if config.modelD:
-    netD = torch.load(config.modelD)
-else:
-    netD = define_D(config.input_nc + config.output_nc, config.ndf, 'batch', False, range(torch.cuda.device_count()))
+
+# if config.modelD:
+#     netD = torch.load(config.modelD)
+# else:
+#     netD = define_D(config.input_nc + config.output_nc, config.ndf, 'batch', False, range(torch.cuda.device_count()))
 
 # Extract features
-features = []
+features_a = []
+features_b = []
 
 
-def hook_fn(module, input, output):
-    features.append(output.cpu().data.numpy())
+def hook_fn_a(module, input, output):
+    features_a.append(output.cpu().data.numpy())
+def hook_fn_b(module, input, output):
+    features_b.append(output.cpu().data.numpy())
 
 
-layer = netG.model[11]
-layer.register_forward_hook(hook_fn)
+# layer_a = netG.model[11]
+# layer_b = netG.model[11]
+# layer_a.register_forward_hook(hook_fn_a)
+# layer_b.register_forward_hook(hook_fn_b)
 
 criterionGAN = GANLoss()
 criterionL1 = nn.L1Loss()
@@ -80,18 +95,18 @@ criterionMSE = nn.MSELoss()
 
 # Setup optimizer
 optimizerG = optim.Adam(netG.parameters(), lr=config.lr, betas=(config.beta1, 0.999))
-optimizerD = optim.Adam(netD.parameters(), lr=config.lr, betas=(config.beta1, 0.999))
+#optimizerD = optim.Adam(netD.parameters(), lr=config.lr, betas=(config.beta1, 0.999))
 
 logging.critical('---------- Networks initialized -------------')
 print_network(netG)
-print_network(netD)
+#print_network(netD)
 logging.critical('-----------------------------------------------')
 
 real_a = torch.FloatTensor(config.batch_size, config.input_nc, 512, 512).cuda()
 real_b = torch.FloatTensor(config.batch_size, config.output_nc, 512, 512).cuda()
 
 if config.cuda:
-    netD = netD.cuda()
+#    netD = netD.cuda()
     netG = netG.cuda()
     criterionGAN = criterionGAN.cuda()
     criterionL1 = criterionL1.cuda()
@@ -102,41 +117,73 @@ if config.cuda:
 real_a = Variable(real_a)
 real_b = Variable(real_b)
 
-all_features = []
+all_features_a = []
+all_features_b = []
 
 scaler = GradScaler()
 
+print(f'Number of iterations: {len(training_data_loader)}')
 for iteration, batch in enumerate(training_data_loader, 1):
-    if iteration > 100:  # Limit the number of batches for t-SNE to avoid memory issues
-        break
-    real_a_cpu, real_b_cpu = batch[0], batch[1]
-    real_a.resize_(real_a_cpu.size()).copy_(real_a_cpu)
-    real_b.resize_(real_b_cpu.size()).copy_(real_b_cpu)
+    if batch is not None:
+        #print(f'batch[0] shape: {batch[0].shape}')
+        if iteration > 100:  # Limit the number of batches for t-SNE to avoid memory issues
+            break
+        real_a_cpu, real_b_cpu = batch[0], batch[1]
+        real_a.resize_(real_a_cpu.size()).copy_(real_a_cpu)
+        real_b.resize_(real_b_cpu.size()).copy_(real_b_cpu)
+        #outputGA = netG(real_a)
+        #print(f'Real a CPU shape: {real_a_cpu.shape}')
 
-    with autocast():
-        outputG = netG(real_a)
+        with autocast():
+            coarse_s, fine_s, coarse_t, fine_t = netG(real_a, real_b)
+            print(f'Coarse s shape: {coarse_s.shape} Fine s shape: {fine_s.shape} Coarse t shape: {coarse_t.shape} Fine t shape: {fine_t.shape}')
+            example_image = fine_s[0]  # Shape: [1, 256, 256]
+            print(f'Example image shape: {example_image.shape}')
+            # Step 2: Squeeze the channel dimension
+            example_image = example_image.squeeze(0)  # Shape: [256, 256]
 
-    if len(features) > 0:
-        extracted_features = features[0]
-        all_features.append(extracted_features)
-        features.clear()
+            # Step 3: Convert to NumPy array (optional)
+            example_image_np = example_image.detach().cpu().numpy()
 
-# Concatenate all features
-all_features = np.concatenate(all_features, axis=0)
-print(f"All features shape: {all_features.shape}")
+            # Step 4: Normalize the image data to range [0, 255] for display
+            example_image_np = (example_image_np - example_image_np.min()) / (
+                        example_image_np.max() - example_image_np.min())
+            example_image_np = (example_image_np * 255).astype(np.uint8)
+            print(example_image_np)
 
-# Flatten the features for t-SNE
-all_features_flattened = all_features.reshape(all_features.shape[0], -1)
-print(f"All features flattened shape: {all_features_flattened.shape}")
+            # Step 5: Convert to a PIL image
+            bw_image = Image.fromarray(example_image_np, mode='L')
 
-# Apply t-SNE
-tsne = TSNE(n_components=2, perplexity=30, n_iter=300)
-tsne_results = tsne.fit_transform(all_features_flattened)
+            # Save the image (optional)
+            bw_image.save("black_and_white_image.png")
 
-# Plot t-SNE
-plt.figure(figsize=(10, 8))
-plt.scatter(tsne_results[:, 0], tsne_results[:, 1], s=5, cmap='tab10')
-plt.title('t-SNE of Extracted Features')
-plt.xlabel('t-SNE Dimension 1')
-plt.ylabel('t-SNE Dimension 2')
-plt.show()
+            # Display the image
+            plt.imshow(bw_image, cmap='gray')
+            plt.axis('off')  # Hide axes
+            plt.show()
+
+
+
+
+
+
+# # Concatenate all features
+# print(f'All features classified from a shape: {coarse_a.shape}')
+# print(f'All features classified from b shape: {coarse_b.shape}')
+
+
+# # Apply t-SNE
+# tsne = TSNE(n_components=2, perplexity=1, n_iter=250)
+# coarse_a_reshaped = pooled_ca.view(pooled_ca.shape[1], -1).detach().cpu().numpy()
+# coarse_b_reshaped = pooled_cb.view(pooled_cb.shape[1], -1).detach().cpu().numpy()
+# print(f'Coarse a reshaped shape: {coarse_a_reshaped.shape} Coarse b reshaped shape: {coarse_b_reshaped.shape}')
+# tsne_results_a = tsne.fit_transform(coarse_a_reshaped)
+# tsne_results_b = tsne.fit_transform(coarse_b_reshaped)
+# print(f't-SNE results a shape: {tsne_results_a.shape} t-SNE results b shape: {tsne_results_b.shape}')
+# # Plot t-SNE
+# plt.figure(figsize=(10, 8))
+# plt.scatter(tsne_results_a, tsne_results_b, s=5, cmap='tab10')
+# plt.title('t-SNE of Extracted Features')
+# plt.xlabel('t-SNE Dimension 1')
+# plt.ylabel('t-SNE Dimension 2')
+# plt.show()

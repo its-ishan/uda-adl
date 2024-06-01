@@ -2,6 +2,12 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 import numpy as np
+from configs import config_loader
+from torch.cuda.amp import autocast, GradScaler
+import torch.nn.functional as F
+
+# Load the configuration
+config = config_loader.load_config('/mnt/nvme0n1p5/projects/UDA-ADL/configs/config.yaml')
 
 class Classifier_Module(nn.Module):
     def __init__(self, inplanes, dilation_series, padding_series, num_classes):
@@ -60,7 +66,7 @@ def define_G(input_nc, output_nc, ngf, norm='batch', use_dropout=False, gpu_ids=
         assert(torch.cuda.is_available())
 
     netG = ResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9, gpu_ids=gpu_ids)
-
+    #print(f'netG features shape : {len(netG.get_features())}')
     if len(gpu_ids) > 0:
         netG.cuda(device=gpu_ids[0])
     netG.apply(weights_init)
@@ -171,40 +177,105 @@ class ResnetGenerator(nn.Module):
         for i in range(n_blocks):
             model += [ResnetBlock(ngf * mult, 'zero', norm_layer=norm_layer, use_dropout=use_dropout)]
 
-        for i in range(n_downsampling):
-            mult = 2**(n_downsampling - i)
-            model += [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
-                                         kernel_size=3, stride=2,
-                                         padding=1, output_padding=1),
-                      norm_layer(int(ngf * mult / 2), affine=True),
-                      nn.ReLU(True)]
-
-        model += [nn.Conv2d(ngf, output_nc, kernel_size=7, padding=3)]
         model += [nn.Tanh()]
 
         self.model = nn.Sequential(*model)
-        self._register_hooks()
+        # self._register_hooks()
         #128*128*256
         #coarse classfier
-        self.classifier = Classifier_Module(256, [6, 12, 18, 24], [6, 12, 18, 24], num_classes=21)
 
-    def _hook_fn(self, module, input, output):
-        self.features.append(output)
+        self.classifier = Classifier_Module(256, [6, 12, 18, 24], [6, 12, 18, 24], num_classes=config.num_classes)
 
-    def _register_hooks(self):
-        for layer in self.model:
-            if isinstance(layer, (nn.Conv2d, nn.ConvTranspose2d)):
-                layer.register_forward_hook(self._hook_fn)
+        self.fine_classifier = nn.Sequential(
+            nn.Conv2d(3, 1024, kernel_size=3, padding=1, dilation=1, bias=False),
+            nn.BatchNorm2d(1024),
+            nn.Dropout2d(0.01, False),
+            nn.Conv2d(1024, config.num_classes, kernel_size=1, stride=1, padding=0, bias=True)
+        )
+        model2=[]
+        model2 += [
+            # nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
+            nn.ConvTranspose2d(config.input_nc, config.output_nc,
+                               kernel_size=3, stride=2,
+                               padding=1, output_padding=1),
+            norm_layer(int(1)),
+            nn.ReLU(True)
+        ]
 
-    def forward(self, input):
+        # Adjust the final convolution to match the desired output shape
+        model2 += [
+            nn.Conv2d(config.input_nc, config.output_nc, kernel_size=7, padding=3),
+            nn.Tanh()
+        ]
+        self.model2 = nn.Sequential(*model2)
+
+    # def _hook_fn(self, module, input, output):
+    #     self.features.append(output)
+    #
+    # def _register_hooks(self):
+    #     for layer in self.model:
+    #         if isinstance(layer, (nn.Conv2d, nn.ConvTranspose2d)):
+    #             layer.register_forward_hook(self._hook_fn)
+
+    def forward(self, inputx, inputy):
+        inputx = inputx.cuda()
+        inputy = inputy.cuda()
+        #batch, channels, height, width
         self.features=[]
-        #print(input.data.size())
-        if self.gpu_ids and isinstance(input.data, torch.cuda.FloatTensor):
-            return nn.parallel.data_parallel(self.model, input, self.gpu_ids)
-        else:
-            return self.model(input)
-    def get_features(self):
-        return self.features
+        with autocast():
+            features_x = self.model(inputx)
+            features_y = self.model(inputy)
+            self.features.append(self.classifier(features_x))
+            self.features.append(self.classifier(features_y))
+            print(f'features_x shape: {features_x.shape}, features_y shape: {features_y.shape}')
+            coarse_x = self.classifier(features_x)
+            coarse_y = self.classifier(features_y)
+            print(f'Coarse x shape: {coarse_x.shape}, Coarse y shape: {coarse_y.shape}')
+
+            b, C, h, w = features_x.size()
+
+            proj_key_x = features_x.view(b, C, -1).permute(0, 2, 1)
+            proj_query_x = torch.sigmoid(coarse_x).view(b, 1, -1)
+            prototype_x = torch.bmm(proj_query_x, proj_key_x)
+            prototype_x = prototype_x / torch.max(prototype_x)
+            print(f'proj_key_x shape: {proj_key_x.shape}, proj_query_x shape: {proj_query_x.shape}, features_x shape: {features_x.shape}, prototypex shape: {prototype_x.shape}')
+            proj_key_y = features_y.view(b, C, -1).permute(0, 2, 1)
+            proj_query_y = torch.sigmoid(coarse_y).view(b, 1, -1)
+            prototype_y = torch.bmm(proj_query_y, proj_key_y)
+            prototype_y = prototype_y / torch.max(prototype_y)
+            features_resize_x = features_x.view(b, C, -1)
+            features_resize_y = features_y.view(b, C, -1)
+            print(f'features_resize_x shape: {features_resize_x.shape}, features_resize_y shape: {features_resize_y.shape}')
+            self_x = torch.bmm(prototype_x, features_resize_x).view(b, 1, h, w)
+            self_x = self_x / torch.max(self_x)
+            print(f' max value is : {torch.max(self_x)}')
+            cross_x = torch.bmm(prototype_y, features_resize_x).view(b, 1, h, w)
+            cross_x = cross_x / torch.max(cross_x)
+
+            self_y = torch.bmm(prototype_y, features_resize_y).view(b, 1, h, w)
+            self_y = self_y / torch.max(self_y)
+            cross_y = torch.bmm(prototype_x, features_resize_y).view(b, 1, h, w)
+            cross_y = cross_y / torch.max(cross_y)
+            refined_x = torch.cat([torch.sigmoid(coarse_x), self_x, cross_x], dim=1)
+            refined_y = torch.cat([torch.sigmoid(coarse_y), self_y, cross_y], dim=1)
+            print(f'Refined x shape: {refined_x.shape}, Refined y shape: {refined_y.shape}')
+            fine_x = self.fine_classifier(torch.sigmoid(refined_x))
+            fine_y = self.fine_classifier(torch.sigmoid(refined_y))
+            print(f'Fine x shape: {fine_x.shape}, Fine y shape: {fine_y.shape}')
+            coarse_out_x = torch.sigmoid(F.interpolate(coarse_x, (256, 256), mode='bilinear', align_corners=True))
+            coarse_out_y = torch.sigmoid(F.interpolate(coarse_y, (256, 256), mode='bilinear', align_corners=True))
+
+            fine_out_x = torch.sigmoid(F.interpolate(fine_x, (256, 256), mode='bilinear', align_corners=True))
+            fine_out_y = torch.sigmoid(F.interpolate(fine_y, (256, 256), mode='bilinear', align_corners=True))
+            #print(f'proj_key_x shape: {proj_key_x.shape}, proj_query_x shape: {proj_query_x.shape}, features_x shape: {features_x.shape}, coarse_x shape: {coarse_x.shape}, inputx shape: {inputx.shape}, b: {b}, C: {C}, h: {h}, w: {w}')
+            print(f'Coarse out x shape: {coarse_out_x.shape}, Fine out x shape: {fine_out_x.shape}, Coarse out y shape: {coarse_out_y.shape}, Fine out y shape: {fine_out_y.shape}')
+
+            cx = self.model2(coarse_out_x)
+            cy = self.model2(coarse_out_y)
+            fx = self.model2(fine_out_x)
+            fy = self.model2(fine_out_y)
+        return cx, fx, cy, fy
+        #return coarse_out_x, fine_out_x, coarse_out_y, fine_out_y
 
 
 # Define a resnet block
@@ -278,3 +349,20 @@ class NLayerDiscriminator(nn.Module):
             return nn.parallel.data_parallel(self.model, input, self.gpu_ids)
         else:
             return self.model(input)
+
+
+
+if __name__ == "__main__":
+    input_nc = 1
+    output_nc = 1
+    ngf = 64
+    gpu_ids = [0]
+
+    netG = define_G(input_nc, output_nc, ngf, norm='batch', use_dropout=False, gpu_ids=gpu_ids)
+
+    input_tensor = torch.randn(2, 1, 512, 512).cuda()
+
+    output = netG(input_tensor)
+
+    print(f'Input shape: {input_tensor.shape}')
+    print(f'Output shape: {output.shape}')
