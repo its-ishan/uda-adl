@@ -180,7 +180,7 @@ for epoch in range(config.epochs):
     bw_image = Image.fromarray(example_image_np, mode='L')
 
     # Save the image (optional)
-    bw_image.save("black_and_white_image.png")
+    bw_image.save(f'black_and_white_image_{epoch}.png')
 
     # Display the image
     plt.imshow(bw_image, cmap='gray')
