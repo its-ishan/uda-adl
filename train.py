@@ -121,46 +121,71 @@ all_features_a = []
 all_features_b = []
 
 scaler = GradScaler()
+criterion = nn.MSELoss()
+optimizer = optim.Adam(netG.parameters(), lr=config.lr, betas=(config.beta1, 0.999))
 
 print(f'Number of iterations: {len(training_data_loader)}')
-for iteration, batch in enumerate(training_data_loader, 1):
-    if batch is not None:
-        #print(f'batch[0] shape: {batch[0].shape}')
-        if iteration > 100:  # Limit the number of batches for t-SNE to avoid memory issues
-            break
-        real_a_cpu, real_b_cpu = batch[0], batch[1]
-        real_a.resize_(real_a_cpu.size()).copy_(real_a_cpu)
-        real_b.resize_(real_b_cpu.size()).copy_(real_b_cpu)
-        #outputGA = netG(real_a)
-        #print(f'Real a CPU shape: {real_a_cpu.shape}')
 
-        with autocast():
-            coarse_s, fine_s, coarse_t, fine_t = netG(real_a, real_b)
-            print(f'Coarse s shape: {coarse_s.shape} Fine s shape: {fine_s.shape} Coarse t shape: {coarse_t.shape} Fine t shape: {fine_t.shape}')
-            example_image = fine_s[0]  # Shape: [1, 256, 256]
-            print(f'Example image shape: {example_image.shape}')
-            # Step 2: Squeeze the channel dimension
-            example_image = example_image.squeeze(0)  # Shape: [256, 256]
+for epoch in range(config.epochs):
+    epoch_loss = 0.0
+    for iteration, batch in enumerate(training_data_loader, 1):
+        if batch is not None:
+            #print(f'batch[0] shape: {batch[0].shape}')
+            if iteration > 100:  # Limit the number of batches for t-SNE to avoid memory issues
+                break
+            real_a_cpu, real_b_cpu = batch[0], batch[1]
+            real_a.resize_(real_a_cpu.size()).copy_(real_a_cpu)
+            real_b.resize_(real_b_cpu.size()).copy_(real_b_cpu)
+            #outputGA = netG(real_a)
+            #print(f'Real a CPU shape: {real_a_cpu.shape}')
+            # Zero the parameter gradients
+            optimizer.zero_grad()
 
-            # Step 3: Convert to NumPy array (optional)
-            example_image_np = example_image.detach().cpu().numpy()
+            with autocast():
+                coarse_s, fine_s, coarse_t, fine_t = netG(real_a, real_b)
+                #print(f'Coarse s shape: {coarse_s.shape} Fine s shape: {fine_s.shape} Coarse t shape: {coarse_t.shape} Fine t shape: {fine_t.shape}')
+                # Calculate loss
+                loss = criterion(fine_s, real_b)
 
-            # Step 4: Normalize the image data to range [0, 255] for display
-            example_image_np = (example_image_np - example_image_np.min()) / (
-                        example_image_np.max() - example_image_np.min())
-            example_image_np = (example_image_np * 255).astype(np.uint8)
-            print(example_image_np)
+                # Backward pass and optimization
+                loss.backward()
+                optimizer.step()
 
-            # Step 5: Convert to a PIL image
-            bw_image = Image.fromarray(example_image_np, mode='L')
+                # Update epoch loss
+                epoch_loss += loss.item()
 
-            # Save the image (optional)
-            bw_image.save("black_and_white_image.png")
+            # # Print iteration info
+            # if iteration % 10 == 0:
+            #     print(
+            #         f"Epoch [{epoch + 1}/{config.epochs}], Iteration [{iteration + 1}/{len(training_data_loader)}], Loss: {loss.item():.4f}")
 
-            # Display the image
-            plt.imshow(bw_image, cmap='gray')
-            plt.axis('off')  # Hide axes
-            plt.show()
+            # Print epoch info
+        print(f"Epoch [{epoch + 1}/{config.epochs}], Average Loss: {epoch_loss / len(training_data_loader):.4f}")
+
+    example_image = fine_s[0]  # Shape: [1, 256, 256]
+    #print(f'Example image shape: {example_image.shape}')
+    # Step 2: Squeeze the channel dimension
+    example_image = example_image.squeeze(0)  # Shape: [256, 256]
+
+    # Step 3: Convert to NumPy array (optional)
+    example_image_np = example_image.detach().cpu().numpy()
+
+    # Step 4: Normalize the image data to range [0, 255] for display
+    example_image_np = (example_image_np - example_image_np.min()) / (
+                example_image_np.max() - example_image_np.min())
+    example_image_np = (example_image_np * 255).astype(np.uint8)
+    #print(example_image_np)
+
+    # Step 5: Convert to a PIL image
+    bw_image = Image.fromarray(example_image_np, mode='L')
+
+    # Save the image (optional)
+    bw_image.save("black_and_white_image.png")
+
+    # Display the image
+    plt.imshow(bw_image, cmap='gray')
+    plt.axis('off')  # Hide axes
+    plt.show()
 
 
 

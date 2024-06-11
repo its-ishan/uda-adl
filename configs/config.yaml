@@ -1,6 +1,7 @@
 seed : 42
 cuda : True
 star : ''
+epochs : 4
 root_dir : '/mnt/nvme0n1p5/projects/UDA-ADL/data'
 batch_size : 2
 patch_size : 32
