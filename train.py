@@ -16,6 +16,7 @@ import torch.backends.cudnn as cudnn
 import logging
 import torch.utils.data as data
 from torch.cuda.amp import autocast, GradScaler
+from util.loss import BceDiceLoss, BCELoss, DiceLoss, MaxSquareloss
 from PIL import Image
 
 def custom_collate(batch):
@@ -68,10 +69,10 @@ if config.modelG:
 else:
     netG = define_G(config.input_nc, config.output_nc, config.ngf, 'batch', False, range(torch.cuda.device_count()))
 
-# if config.modelD:
-#     netD = torch.load(config.modelD)
-# else:
-#     netD = define_D(config.input_nc + config.output_nc, config.ndf, 'batch', False, range(torch.cuda.device_count()))
+if config.modelD:
+    netD = torch.load(config.modelD)
+else:
+    netD = define_D(config.input_nc + config.output_nc, config.ndf, 'batch', False, range(torch.cuda.device_count()))
 
 # Extract features
 features_a = []
@@ -91,11 +92,13 @@ def hook_fn_b(module, input, output):
 
 criterionGAN = GANLoss()
 criterionL1 = nn.L1Loss()
-criterionMSE = nn.MSELoss()
+# criterionMSE = nn.MSELoss()
+criterionDice = DiceLoss()
+#optimizer = optim.Adam(netG.parameters(), lr=config.lr, betas=(config.beta1, 0.999))
 
 # Setup optimizer
 optimizerG = optim.Adam(netG.parameters(), lr=config.lr, betas=(config.beta1, 0.999))
-#optimizerD = optim.Adam(netD.parameters(), lr=config.lr, betas=(config.beta1, 0.999))
+optimizerD = optim.Adam(netD.parameters(), lr=config.lr, betas=(config.beta1, 0.999))
 
 logging.critical('---------- Networks initialized -------------')
 print_network(netG)
@@ -109,8 +112,8 @@ if config.cuda:
 #    netD = netD.cuda()
     netG = netG.cuda()
     criterionGAN = criterionGAN.cuda()
-    criterionL1 = criterionL1.cuda()
-    criterionMSE = criterionMSE.cuda()
+    # criterionL1 = criterionL1.cuda()
+    # criterionMSE = criterionMSE.cuda()
     real_a = real_a.cuda()
     real_b = real_b.cuda()
 
@@ -121,8 +124,7 @@ all_features_a = []
 all_features_b = []
 
 scaler = GradScaler()
-criterion = nn.MSELoss()
-optimizer = optim.Adam(netG.parameters(), lr=config.lr, betas=(config.beta1, 0.999))
+
 
 print(f'Number of iterations: {len(training_data_loader)}')
 
@@ -130,7 +132,7 @@ for epoch in range(config.epochs):
     epoch_loss = 0.0
     for iteration, batch in enumerate(training_data_loader, 1):
         if batch is not None:
-            #print(f'batch[0] shape: {batch[0].shape}')
+            print(f'batch[0] shape: {batch[0].shape}', f'batch[1] shape: {batch[1].shape}')
             if iteration > 100:  # Limit the number of batches for t-SNE to avoid memory issues
                 break
             real_a_cpu, real_b_cpu = batch[0], batch[1]
@@ -139,25 +141,66 @@ for epoch in range(config.epochs):
             #outputGA = netG(real_a)
             #print(f'Real a CPU shape: {real_a_cpu.shape}')
             # Zero the parameter gradients
-            optimizer.zero_grad()
+            #optimizer.zero_grad()
 
             with autocast():
                 coarse_s, fine_s, coarse_t, fine_t = netG(real_a, real_b)
                 #print(f'Coarse s shape: {coarse_s.shape} Fine s shape: {fine_s.shape} Coarse t shape: {coarse_t.shape} Fine t shape: {fine_t.shape}')
                 # Calculate loss
-                loss = criterion(fine_s, real_b)
+                lossDice = criterionDice(fine_t, real_b)
 
-                # Backward pass and optimization
-                loss.backward()
-                optimizer.step()
+                ############################
+                # (1) Update D network: maximize log(D(x,y)) + log(1 - D(x,G(x)))
+                ###########################
 
-                # Update epoch loss
-                epoch_loss += loss.item()
+                optimizerD.zero_grad()
 
-            # # Print iteration info
-            # if iteration % 10 == 0:
-            #     print(
-            #         f"Epoch [{epoch + 1}/{config.epochs}], Iteration [{iteration + 1}/{len(training_data_loader)}], Loss: {loss.item():.4f}")
+                # train with fake
+                fake_ab = torch.cat((real_a, fine_t), 1)
+                pred_fake = netD.forward(fake_ab.detach())
+                loss_d_fake = criterionGAN(pred_fake, False)
+
+                # train with real
+                real_ab = torch.cat((real_a, real_b), 1)
+                pred_real = netD.forward(real_ab)
+                loss_d_real = criterionGAN(pred_real, True)
+
+                # Combined loss
+                loss_d = (loss_d_fake + loss_d_real) * 0.5
+
+                loss_d.backward()
+
+                optimizerD.step()
+
+                ############################
+                # (2) Update G network: maximize log(D(x,G(x))) + L1(y,G(x))
+                ##########################
+                optimizerG.zero_grad()
+                # First, G(A) should fake the discriminator
+                fake_ab = torch.cat((real_a, fine_t), 1)
+                pred_fake = netD.forward(fake_ab)
+                loss_g_gan = criterionGAN(pred_fake, True)
+
+                # Second, G(A) = B
+                loss_g_l1 = criterionL1(fine_t, real_b) * 5 #opt.lamb
+
+                loss_g = loss_g_gan + loss_g_l1
+
+                loss_g.backward()
+
+                optimizerG.step()
+
+                #Backward pass and optimization
+                # loss.backward()
+                # optimizer.step()
+                #
+                # # Update epoch loss
+                # epoch_loss += loss.item()
+
+            # Print iteration info
+            if iteration % 10 == 0:
+                print(
+                    f"Epoch [{epoch + 1}/{config.epochs}], Iteration [{iteration + 1}/{len(training_data_loader)}], Loss: {lossDice.item():.4f}")
 
             # Print epoch info
         print(f"Epoch [{epoch + 1}/{config.epochs}], Average Loss: {epoch_loss / len(training_data_loader):.4f}")

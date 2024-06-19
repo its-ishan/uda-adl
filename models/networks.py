@@ -201,6 +201,14 @@ class ResnetGenerator(nn.Module):
             norm_layer(int(1)),
             nn.ReLU(True)
         ]
+        model2 += [
+            # nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
+            nn.ConvTranspose2d(config.input_nc, config.output_nc,
+                               kernel_size=3, stride=2,
+                               padding=1, output_padding=1),
+            norm_layer(int(1)),
+            # nn.ReLU(False)
+        ]
 
         # Adjust the final convolution to match the desired output shape
         model2 += [
@@ -223,14 +231,15 @@ class ResnetGenerator(nn.Module):
         #batch, channels, height, width
         self.features=[]
         with autocast():
+            print(f'inputx shape: {inputx.shape}, inputy shape: {inputy.shape}')
             features_x = self.model(inputx)
             features_y = self.model(inputy)
             self.features.append(self.classifier(features_x))
             self.features.append(self.classifier(features_y))
-            #print(f'features_x shape: {features_x.shape}, features_y shape: {features_y.shape}')
+            print(f'features_x shape: {features_x.shape}, features_y shape: {features_y.shape}')
             coarse_x = self.classifier(features_x)
             coarse_y = self.classifier(features_y)
-            #print(f'Coarse x shape: {coarse_x.shape}, Coarse y shape: {coarse_y.shape}')
+            print(f'Coarse x shape: {coarse_x.shape}, Coarse y shape: {coarse_y.shape}')
 
             b, C, h, w = features_x.size()
 
@@ -238,14 +247,14 @@ class ResnetGenerator(nn.Module):
             proj_query_x = torch.sigmoid(coarse_x).view(b, 1, -1)
             prototype_x = torch.bmm(proj_query_x, proj_key_x)
             prototype_x = prototype_x / torch.max(prototype_x)
-            #print(f'proj_key_x shape: {proj_key_x.shape}, proj_query_x shape: {proj_query_x.shape}, features_x shape: {features_x.shape}, prototypex shape: {prototype_x.shape}')
+            print(f'proj_key_x shape: {proj_key_x.shape}, proj_query_x shape: {proj_query_x.shape}, features_x shape: {features_x.shape}, prototypex shape: {prototype_x.shape}')
             proj_key_y = features_y.view(b, C, -1).permute(0, 2, 1)
             proj_query_y = torch.sigmoid(coarse_y).view(b, 1, -1)
             prototype_y = torch.bmm(proj_query_y, proj_key_y)
             prototype_y = prototype_y / torch.max(prototype_y)
             features_resize_x = features_x.view(b, C, -1)
             features_resize_y = features_y.view(b, C, -1)
-            #print(f'features_resize_x shape: {features_resize_x.shape}, features_resize_y shape: {features_resize_y.shape}')
+            print(f'features_resize_x shape: {features_resize_x.shape}, features_resize_y shape: {features_resize_y.shape}')
             self_x = torch.bmm(prototype_x, features_resize_x).view(b, 1, h, w)
             self_x = self_x / torch.max(self_x)
             #print(f' max value is : {torch.max(self_x)}')
@@ -258,22 +267,24 @@ class ResnetGenerator(nn.Module):
             cross_y = cross_y / torch.max(cross_y)
             refined_x = torch.cat([torch.sigmoid(coarse_x), self_x, cross_x], dim=1)
             refined_y = torch.cat([torch.sigmoid(coarse_y), self_y, cross_y], dim=1)
-            #print(f'Refined x shape: {refined_x.shape}, Refined y shape: {refined_y.shape}')
+            print(f'Refined x shape: {refined_x.shape}, Refined y shape: {refined_y.shape}')
             fine_x = self.fine_classifier(torch.sigmoid(refined_x))
             fine_y = self.fine_classifier(torch.sigmoid(refined_y))
-            #print(f'Fine x shape: {fine_x.shape}, Fine y shape: {fine_y.shape}')
-            coarse_out_x = torch.sigmoid(F.interpolate(coarse_x, (256, 256), mode='bilinear', align_corners=True))
-            coarse_out_y = torch.sigmoid(F.interpolate(coarse_y, (256, 256), mode='bilinear', align_corners=True))
+            print(f'Fine x shape: {fine_x.shape}, Fine y shape: {fine_y.shape}')
+            coarse_out_x = torch.sigmoid(F.interpolate(coarse_x, (128, 128), mode='bilinear', align_corners=True))
+            coarse_out_y = torch.sigmoid(F.interpolate(coarse_y, (128, 128), mode='bilinear', align_corners=True))
 
-            fine_out_x = torch.sigmoid(F.interpolate(fine_x, (256, 256), mode='bilinear', align_corners=True))
-            fine_out_y = torch.sigmoid(F.interpolate(fine_y, (256, 256), mode='bilinear', align_corners=True))
-            #print(f'proj_key_x shape: {proj_key_x.shape}, proj_query_x shape: {proj_query_x.shape}, features_x shape: {features_x.shape}, coarse_x shape: {coarse_x.shape}, inputx shape: {inputx.shape}, b: {b}, C: {C}, h: {h}, w: {w}')
-            #print(f'Coarse out x shape: {coarse_out_x.shape}, Fine out x shape: {fine_out_x.shape}, Coarse out y shape: {coarse_out_y.shape}, Fine out y shape: {fine_out_y.shape}')
+            fine_out_x = torch.sigmoid(F.interpolate(fine_x, (128, 128), mode='bilinear', align_corners=True))
+            fine_out_y = torch.sigmoid(F.interpolate(fine_y, (128, 128), mode='bilinear', align_corners=True))
+            print(f'proj_key_x shape: {proj_key_x.shape}, proj_query_x shape: {proj_query_x.shape}, features_x shape: {features_x.shape}, coarse_x shape: {coarse_x.shape}, inputx shape: {inputx.shape}, b: {b}, C: {C}, h: {h}, w: {w}')
+            print(f'Coarse out x shape: {coarse_out_x.shape}, Fine out x shape: {fine_out_x.shape}, Coarse out y shape: {coarse_out_y.shape}, Fine out y shape: {fine_out_y.shape}')
 
             cx = self.model2(coarse_out_x)
+            print(f'coarse x: {coarse_x[0, 0, :, :]}, coarse_out_x: {coarse_out_x[0, 0, :, :]}, cx: {cx[0, 0, :, :]}')
             cy = self.model2(coarse_out_y)
             fx = self.model2(fine_out_x)
             fy = self.model2(fine_out_y)
+            #print(f'cx shape: {cx.shape}, fx shape: {fx.shape}, cy shape: {cy.shape}, fy shape: {fy.shape}')
         return cx, fx, cy, fy
         #return coarse_out_x, fine_out_x, coarse_out_y, fine_out_y
 
